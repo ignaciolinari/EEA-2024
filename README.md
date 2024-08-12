@@ -1,4 +1,4 @@
-# EEA-UBA 2023
+# EEA-UBA 2024
 
 ## Ayudantes
 
@@ -138,7 +138,7 @@ Regularización: modelos Ridge, Lasso y Elastic Net y trade off sesgo-varianza
 
 #### Datasets para técnicas de regularización
 
-- [Datos de estádisticas de juego de la NBA](fuentes/nba/nba_player_stats_salary_2022_2023.csv)
+- [Datos de estádisticas de juego de la NBA](fuentes/nba/nba_player_stats_salary_2022_2024.csv)
 
 ### Clase 12: Modelos Aditivos Generalizados: Prophet
 
