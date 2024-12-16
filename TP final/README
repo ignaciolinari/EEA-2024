@@ -1,0 +1,3 @@
+soja_total_serie es la combinacion de ambos datasets descargados de https://www.datos.gob.ar/dataset/agroindustria-soja---siembra-cosecha-produccion-rendimiento mediante combina_series.R
+
+El Script final es la notebook TP_final.Rmd, que puede visualizarse facilmente con el .html
