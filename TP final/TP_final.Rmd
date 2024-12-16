@@ -1,0 +1,627 @@
+---
+title: 'Trabajo Práctico final: Modelos Lineales Mixtos'
+author: "Ignacio Linari"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  html_notebook: default
+subtitle: Enfoque Estadístico del Aprendizaje
+---
+
+```{r setup, include=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r tp final eea, message= FALSE, echo=FALSE}
+
+r = getOption("repos")
+r["CRAN"] = "http://cran.us.r-project.org"
+options(repos = r)
+```
+
+## Introducción
+
+```{r intro, message=FALSE}
+rm(list = ls()) # Borro todos los objetos
+gc() # Garbage Collection
+
+# Leer los datos
+soja_data <- read.csv("/Users/ignacio/Downloads/soja_total_serie.csv", encoding = "latin1")
+```
+
+
+## Análisis exploratorio
+
+```{r explo, message=FALSE}
+
+
+# Estadística descriptiva básica
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(GGally)
+
+# Resumen numérico de las variables cuantitativas
+summary(select(soja_data, where(is.numeric)))
+
+# Verificar valores ausentes
+colSums(is.na(soja_data))
+
+# Visualización: distribuciones de las variables numéricas
+soja_data %>%
+  select(where(is.numeric)) %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Valor") %>%
+  ggplot(aes(x = Valor)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "black", alpha = 0.7) +
+  facet_wrap(~ Variable, scales = "free") +
+  theme_minimal() +
+  labs(title = "Distribuciones de Variables Numéricas", x = "", y = "Frecuencia")
+
+# Resumen de variables categóricas
+soja_data %>%
+  select(where(is.character)) %>%
+  summarise(across(everything(), ~ length(unique(.)))) %>%
+  t() %>%
+  data.frame() %>%
+  setNames(c("Niveles Únicos"))
+
+# Q-Q plots para todas las variables cuantitativas
+soja_data %>%
+  select(where(is.numeric)) %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Valor") %>%
+  ggplot(aes(sample = Valor)) +
+  stat_qq() +
+  stat_qq_line() +
+  facet_wrap(~ Variable, scales = "free") +
+  theme_minimal() +
+  labs(title = "Q-Q Plots de las Variables Cuantitativas")
+
+# Pruebas de normalidad para cada variable numérica (submuestreo de 5000 observaciones para validez de test)
+soja_data %>%
+  select(where(is.numeric)) %>%
+  summarise(across(everything(), ~ shapiro.test(sample(., size = min(length(.), 5000)))$p.value)) %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "p_value") %>%
+  mutate(Normalidad = ifelse(p_value > 0.05, "Sí", "No"))
+
+# Crear boxplot por provincia para identificar outliers en la variable "produccion_tm"
+ggplot(soja_data, aes(x = provincia_nombre, y = produccion_tm)) +
+  geom_boxplot(fill = "steelblue", color = "black", outlier.colour = "red", outlier.shape = 16, outlier.size = 3) +
+  theme_minimal() +
+  labs(title = "Distribución de la Producción por Provincia",
+       x = "Provincia", 
+       y = "Producción Total (tm)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Para que los nombres de las provincias sean legibles
+
+# Filtrar solo las variables que se usarán en el modelo
+soja_data_modelo <- soja_data %>%
+  select(produccion_tm, superficie_cosechada_ha, anio, cultivo_nombre)#, provincia_nombre)#, departamento_nombre)
+
+# Crear el correlograma
+ggpairs(soja_data_modelo, 
+        mapping = aes(color = cultivo_nombre),  
+        title = "Correlograma de Variables Seleccionadas para el Modelo") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+Vemos que no se cumplen los supuestos de nomralidad y homocedasticidad, además de la presencia de valores atípicos en la variable "produccion_tm". Por lo tanto, es lógico ajustar un modelo lineal mixto robusto para mitigar estos problemas. Pero cabe destacar la fuerte correlacion entre las variables "superficie_cosechada_ha" y "produccion_tm", lo que indica que la superficie cosechada es un predictor importante de la producción de soja y por eso para empezar se hará un ajuste lineal simple para usar como referencia.
+
+
+```{r traintest, message=FALSE}
+# Dividir los datos en entrenamiento (70%) y prueba (30%)
+set.seed(123)  # Para que los resultados sean reproducibles
+indice_entrenamiento <- sample(1:nrow(soja_data), size = 0.7 * nrow(soja_data))
+soja_entrenamiento <- soja_data[indice_entrenamiento, ]
+soja_prueba <- soja_data[-indice_entrenamiento, ]
+
+# Verificación de la distribución de los datos
+ggplot(soja_entrenamiento, aes(x = produccion_tm)) +
+  geom_histogram(fill = "steelblue", color = "black", alpha = 0.7) +
+  ggtitle("Distribución de la Producción en el Conjunto de Entrenamiento")
+
+ggplot(soja_prueba, aes(x = produccion_tm)) +
+  geom_histogram(fill = "darkorange", color = "black", alpha = 0.7) +
+  ggtitle("Distribución de la Producción en el Conjunto de Prueba")
+```
+
+Vemos que se mantienen las distribuciones en ambas particiones, lo que indica que la división fue aleatoria y no sesgada.
+
+
+```{r modlin, message=FALSE}
+# Ajustar un modelo lineal simple
+modelo_lineal_simple <- lm(produccion_tm ~ superficie_cosechada_ha, data = soja_entrenamiento)
+
+# Resumen del modelo lineal simple
+summary(modelo_lineal_simple)
+
+# Realizar predicciones con el modelo lineal simple en el conjunto de prueba
+predicciones_lineal_simple <- predict(modelo_lineal_simple, newdata = soja_prueba)
+
+# Calcular el RMSE (Root Mean Squared Error)
+rmse_lineal_simple <- sqrt(mean((soja_prueba$produccion_tm - predicciones_lineal_simple)^2))
+
+# Calcular el MAE (Mean Absolute Error)
+mae_lineal_simple <- mean(abs(soja_prueba$produccion_tm - predicciones_lineal_simple))
+
+# Calcular el MSE (Mean Squared Error)
+mse_lineal_simple <- mean((soja_prueba$produccion_tm - predicciones_lineal_simple)^2)
+
+# Calcular el R² (Coeficiente de determinación)
+r2_lineal_simple <- 1 - sum((soja_prueba$produccion_tm - predicciones_lineal_simple)^2) / sum((soja_prueba$produccion_tm - mean(soja_prueba$produccion_tm))^2)
+
+# Mostrar los resultados
+cat("RMSE del modelo lineal simple:", rmse_lineal_simple, "\n")
+cat("MAE del modelo lineal simple:", mae_lineal_simple, "\n")
+cat("MSE del modelo lineal simple:", mse_lineal_simple, "\n")
+cat("R² del modelo lineal simple:", r2_lineal_simple, "\n")
+
+# Graficar las predicciones vs los valores reales del modelo lineal simple
+predicciones_lineal_df <- data.frame(
+  Real = soja_prueba$produccion_tm,
+  Prediccion_Lineal_Simple = predicciones_lineal_simple
+)
+
+ggplot(predicciones_lineal_df, aes(x = Real)) +
+  geom_point(aes(y = Prediccion_Lineal_Simple), color = "green", alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  labs(
+    title = "Predicciones vs Valores Reales: Modelo Lineal Simple",
+    x = "Valores Reales",
+    y = "Predicciones"
+  )
+
+# Comparar los residuos del modelo lineal simple con los valores reales
+residuos_lineal_simple_test <- soja_prueba$produccion_tm - predicciones_lineal_simple
+
+# Crear un gráfico de los residuos
+residuos_lineal_simple_df <- data.frame(
+  Residuos = residuos_lineal_simple_test
+)
+
+ggplot(residuos_lineal_simple_df, aes(x = Residuos)) +
+  geom_histogram(bins = 30, alpha = 0.7, fill = "green") +
+  theme_minimal() +
+  labs(title = "Distribución de Residuos del Modelo Lineal Simple", 
+       x = "Residuos", y = "Frecuencia")
+```
+	
+	Modelo Ajustado:
+La ecuación ajustada es:
+
+$$
+\text{producción_tm} = -10220 + 3.021 \cdot \text{superficie_cosechada_ha}
+$$
+
+
+	Coeficientes:
+	•	Intercepto: -10220, indica el valor esperado de la producción cuando la superficie cosechada es cero.
+	•	Pendiente: 3.021, muestra que por cada aumento de una hectárea cosechada, la producción aumenta en promedio 3.021 toneladas.
+
+  Estadísticas de Significancia:
+Ambos coeficientes son altamente significativos (p < 2e-16).
+
+	Ajuste del Modelo:
+	•	R^2: 0.9318, lo que indica que el modelo explica el 93.18% de la variabilidad en la producción.
+	
+	Errores del Modelo:
+	•	Residual Standard Error: 54490, mide la dispersión de los residuos.
+	•	RMSE (Error Cuadrático Medio de Raíz): 58846.48, evalúa el error promedio del modelo en la misma escala que la variable dependiente.
+	•	MAE (Error Absoluto Medio): 26271.46, representa el error promedio absoluto.
+	•	MSE (Error Cuadrático Medio): 3462907826, muestra la magnitud del error promedio al cuadrado.
+	• R^2 del ajuste: 0.9083
+
+```{r modlin2, message=FALSE}
+library(broom)
+
+# Ajustar el modelo lineal
+modelo_lineal <- lm(produccion_tm ~ superficie_cosechada_ha, data = soja_data)
+
+# Extraer el R²
+r2 <- summary(modelo_lineal)$r.squared
+
+# Crear el scatter plot con la regresión lineal y R²
+ggplot(soja_data, aes(x = superficie_cosechada_ha, y = produccion_tm)) +
+  geom_point(color = "steelblue", alpha = 0.7) +  # Puntos del scatter plot
+  geom_smooth(method = "lm", se = TRUE, color = "red", fill = "lightgray") +  # Línea de regresión con intervalo de confianza
+  theme_minimal() +
+  labs(title = paste("Producción en Función de la Superficie Cosechada (R² = ", round(r2, 3), ")", sep = ""),
+       x = "Superficie Cosechada (ha)", 
+       y = "Producción Total (tm)") 
+
+```
+
+
+```{r modlin3, message=FALSE}
+# Ajustar un modelo lineal por provincia
+modelos_por_provincia <- soja_data %>%
+  group_by(provincia_nombre) %>%   # Agrupar por provincia
+  do(modelo = lm(produccion_tm ~ superficie_cosechada_ha, data = .)) # Ajustar el modelo
+
+# Ver el resumen de los modelos ajustados por provincia
+resultados_modelos <- modelos_por_provincia %>%
+  summarise(
+    provincia = provincia_nombre,
+    coef_intercepto = coef(modelo)[1],
+    coef_superficie = coef(modelo)[2],
+    r2 = summary(modelo)$r.squared
+  )
+
+# Visualización de las rectas de regresión para cada provincia con colores por provincia
+ggplot(soja_data, aes(x = superficie_cosechada_ha, y = produccion_tm, color = provincia_nombre)) +
+  geom_point(alpha = 0.7) +  # Puntos del scatter plot
+  geom_smooth(method = "lm", se = FALSE, aes(group = provincia_nombre)) + # Línea de regresión por provincia
+  theme_minimal() +
+  labs(title = "Producción en Función de Superficie Cosechada por Provincia",
+       x = "Superficie Cosechada (ha)", 
+       y = "Producción Total (tm)") +
+  theme(legend.position = "right")  # Mostrar la leyenda de provincias
+```
+
+Esto nos da la pauta de que la superficie cosechada es un predictor importante de la producción de soja, pero también que hay diferencias significativas entre las provincias. Por lo tanto, es necesario ajustar un modelo lineal mixto para considerar estas diferencias y la estructura jerárquica de los datos.
+
+
+```{r modmixrob, message=FALSE}
+# Se procede con el modelo lineal mixto robusto
+
+# Cargar la librería
+library(robustlmm)
+
+# Ajustar un modelo lineal mixto robusto con los datos de entrenamiento
+modelo_robusto <- rlmer(produccion_tm ~ superficie_cosechada_ha + anio + cultivo_nombre +
+                          (1 | provincia_nombre/departamento_nombre),
+                        data = soja_entrenamiento)
+
+# Resumen del modelo robusto
+summary(modelo_robusto)
+```
+#Estructura del Modelo
+
+Fórmula:
+$$\text{producción_tm} = \beta_0 + \beta_1 \cdot \text{superficie_cosechada_ha} + \beta_2 \cdot \text{año} + \beta_3 \cdot \text{cultivo_nombre} + u_0 + v_0 + \epsilon$$
+	•	 efecto aleatorio para cada provincia:
+	$$u_0 \sim N(0, \sigma^2_{\text{provincia}})$$ 
+	•	 efecto aleatorio adicional para cada departamento:
+	$$v_0 \sim N(0, \sigma^2_{\text{departamento dentro de provincia}})$$
+	•	error residual robusto:
+	$$ \epsilon \sim N(0, \sigma^2_{\text{residual}})$$
+	
+	Residuos Escalados
+	•	Mín. y Máx. Residuos Escalados:
+	•	Rango amplio (-31.584 a 41.744) indica algunos valores atípicos severos.
+	•	Mediana cercana a 0: Residuos están centrados, señal de un buen ajuste promedio.
+	
+#Componentes Aleatorios
+
+Varianzas:
+	•	Residuales:  280,270,537  ( Desv. Est. = 16,741 )
+	•	Efectos de Departamentos dentro de Provincias:  52,087,979  ( Desv. Est. = 7,217 )
+	•	Efectos de Provincias:  13,557,889  ( Desv. Est. = 3,682 )
+
+Interpretación:
+Los mayores efectos aleatorios provienen de los departamentos dentro de las provincias, pero los efectos residuales dominan la variabilidad.
+
+#Efectos Fijos
+
+Coeficientes Estimados:
+	•	(Intercepto): -660,400: Producción base ajustada.
+	•	superficie_cosechada_ha: 2.947: Cada hectárea adicional aumenta la producción en 2.947 toneladas (robusto y muy significativo).
+	•	año: 326.4: Incremento anual promedio en toneladas, probablemente debido a mejoras tecnológicas o climáticas.
+	•	cultivo_nombre soja 2da: -4,175: Producción promedio para “soja 2da” es menor en 4,175 toneladas respecto a la referencia.
+
+Significación:
+	•	Todos los coeficientes son altamente significativos (t-values > 8).
+	
+	Correlación entre Efectos Fijos
+	•	Alta correlación negativa entre el intercepto y el año (-1.00): el intercepto ajusta a los años más antiguos.
+	•	Correlación moderada (0.42) entre “soja 2da” y la superficie cosechada, indicando relación entre tipo de cultivo y área.
+	
+	Robustez
+	•	Pesos de Residuos:
+	•	4781 residuos tienen pesos cercanos a 1, indicando un buen ajuste para la mayoría.
+	•	Los valores restantes tienen pesos menores, lo que sugiere un manejo robusto de valores atípicos.
+	•	Pesos de Efectos Aleatorios:
+	•	Departamentos/Provincias: Pesos más bajos para algunos grupos, sugiriendo estructuras heterogéneas.
+	
+Este modelo robusto lineal mixto captura adecuadamente las relaciones entre las variables explicativas y la producción. La inclusión de efectos aleatorios por provincias y departamentos mejora el ajuste al considerar las estructuras jerárquicas. La robustez garantiza que el modelo sea menos sensible a valores atípicos.
+
+```{r efectos, message=FALSE}
+# Gráfico de los efectos fijos
+
+# Coeficientes de efectos fijos
+coef_fijos <- summary(modelo_robusto)$coefficients
+
+# Crear un gráfico de los efectos fijos
+coef_fijos_df <- data.frame(
+  Variable = rownames(coef_fijos),
+  Estimate = coef_fijos[, "Estimate"],
+  StdError = coef_fijos[, "Std. Error"]
+)
+
+ggplot(coef_fijos_df, aes(x = Variable, y = Estimate, ymin = Estimate - StdError, ymax = Estimate + StdError)) +
+  geom_pointrange() +
+  theme_minimal() +
+  labs(title = "Efectos Fijos", y = "Estimación de Coeficiente", x = "Variable") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Efectos aleatorios
+ranef(modelo_robusto)
+
+# Extraer los efectos aleatorios por provincia para visualizar
+efectos_provincia <- ranef(modelo_robusto)$provincia_nombre
+efectos_provincia_df <- data.frame(
+  provincia = rownames(efectos_provincia),
+  intercepto = efectos_provincia[, "(Intercept)"]
+)
+
+# Ordenar las provincias por el valor del intercepto
+efectos_provincia_df <- efectos_provincia_df[order(efectos_provincia_df$intercepto), ]
+
+# Crear el gráfico
+ggplot(efectos_provincia_df, aes(x = reorder(provincia, intercepto), y = intercepto)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +  # Para que las provincias aparezcan en el eje y
+  labs(
+    title = "Efectos Aleatorios por Provincia",
+    x = "Provincia",
+    y = "Intercepto"
+  ) +
+  theme_minimal()
+```
+
+Queda un poco fuera de escala el gráfico, con las variables normalizadas se vería mejor, aunque se pierde un poco de interpretación y no mejoran significativamente los resultados.
+
+
+```{r modnorob, message=FALSE}
+# Comparo con el modelo no robusto
+
+# Cargar la librería lme4
+library(lme4)
+
+# Ajustar el modelo lineal mixto estándar con los datos de entrenamiento
+modelo_estandar <- lmer(produccion_tm ~ superficie_cosechada_ha + anio + cultivo_nombre +
+                          (1 | provincia_nombre/departamento_nombre),
+                        data = soja_entrenamiento)
+
+# Resumen del modelo estándar
+summary(modelo_estandar)
+
+```
+
+
+Componentes Aleatorios
+
+Varianzas:
+
+	•	Departamentos dentro de Provincias:  518,700,000  ( Desv. Est. = 22,775 )
+	
+	•	Provincias:  45,970,000  ( Desv. Est. = 6,780 )
+	
+	•	Residuales:  2,324,000,000  ( Desv. Est. = 48,203 )
+	
+
+Interpretación:
+
+	•	La mayor parte de la variabilidad sigue siendo explicada por los residuos, pero los efectos aleatorios jerárquicos son significativos, especialmente a nivel de departamentos dentro de provincias.
+	
+Efectos Fijos
+
+Coeficientes Estimados:
+
+	•	(Intercepto): -1,694,000: Producción base ajustada.
+	
+	•	superficie_cosechada_ha: 3.027: Cada hectárea adicional aumenta la producción en 3.027 toneladas (significativo).
+	
+	•	año: 838.6: Incremento promedio anual en producción, posiblemente debido a factores externos como tecnología o clima.
+	
+	•	cultivo_nombresoja 2da: -6,734: Producción promedio de “soja 2da” es menor en 6,734 toneladas respecto a la referencia.
+	
+
+Significación:
+
+	•	Todos los coeficientes son estadísticamente significativos (t > 4.8).
+
+```{r table, message=FALSE}	
+# 	Aspecto	            Modelo REML       	    Modelo Robusto
+# Varianza Residual	2.324e+09 (48,203)	    2.802e+08 (16,741)
+# Random Effects (Deptos)	518.7e+06 (22,775)	52.1e+06 (7,217)
+# Fixed Effect (superficie)	3.027	            2.947
+# Fixed Effect (cultivo)	-6,734	            -4,175
+
+# Crear un data frame con los aspectos y resultados
+aspectos <- data.frame(
+  Aspecto = c("Varianza Residual", "Random Effects (Deptos)", "Fixed Effect (superficie)", "Fixed Effect (cultivo)"),
+  `Modelo REML` = c("2.324e+09", "518.7e+06", "3.027", "-6,734"),
+  `Modelo Robusto` = c("2.802e+08", "52.1e+06", "2.947", "-4,175")
+)
+
+# Mostrar la tabla formateada
+print(aspectos)
+```
+	
+	•	Residuos más grandes en el modelo REML (>10), lo que indica que no maneja valores atípicos tan bien como el robusto.
+	•	Varianza residual más alta en REML, señal de menos control sobre la heterogeneidad en los datos.
+	•	Sin embargo, los coeficientes en ambos modelos son consistentes en dirección y magnitud, indicando un patrón estable.
+
+
+
+```{r coefvis, message=FALSE}
+
+# Extraer coeficientes de efectos fijos del modelo estándar
+coef_estandar <- summary(modelo_estandar)$coefficients
+
+# Unir los coeficientes de ambos modelos en un dataframe
+comparacion_coef <- data.frame(
+  Variable = rownames(coef_fijos),
+  Estimacion_Robusta = coef_fijos[, "Estimate"],
+  Estimacion_Estandar = coef_estandar[, "Estimate"]
+)
+
+# Visualizar la comparación
+library(reshape2)
+comparacion_long <- melt(comparacion_coef, id.vars = "Variable")
+
+ggplot(comparacion_long, aes(x = Variable, y = value, fill = variable)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  labs(title = "Comparación de Efectos Fijos: Robusto vs Estándar",
+       y = "Estimación de Coeficiente", x = "Variable") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("steelblue", "darkorange"), labels = c("Robusto", "Estándar"))
+
+# Efectos aleatorios del modelo estándar
+efectos_provincia_estandar <- ranef(modelo_estandar)$provincia_nombre
+efectos_comparacion <- data.frame(
+  provincia = rownames(efectos_provincia),
+  Intercepto_Robusto = efectos_provincia[, "(Intercept)"],
+  Intercepto_Estandar = efectos_provincia_estandar[, "(Intercept)"]
+)
+
+# Visualizar la comparación con un gráfico
+efectos_comparacion %>%
+  pivot_longer(cols = c(Intercepto_Robusto, Intercepto_Estandar), names_to = "Modelo", values_to = "Valor") %>%
+  ggplot(aes(x = reorder(provincia, Valor), y = Valor, fill = Modelo)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  labs(
+    title = "Comparación de Efectos Aleatorios: Robusto vs Estándar",
+    x = "Provincia", y = "Intercepto"
+  ) +
+  theme_minimal() +
+  scale_fill_manual(values = c("steelblue", "darkorange"), labels = c("Robusto", "Estándar"))
+
+# Residuos de ambos modelos
+residuos_robusto <- residuals(modelo_robusto)
+residuos_estandar <- residuals(modelo_estandar)
+
+# Visualización de los residuos
+residuos_df <- data.frame(
+  Residuos = c(residuos_robusto, residuos_estandar),
+  Modelo = rep(c("Robusto", "Estándar"), each = length(residuos_robusto))
+)
+
+ggplot(residuos_df, aes(x = Residuos, fill = Modelo)) +
+  geom_histogram(bins = 30, alpha = 0.7, position = "identity") +
+  theme_minimal() +
+  labs(title = "Distribución de Residuos: Robusto vs Estándar", x = "Residuos", y = "Frecuencia") +
+  scale_fill_manual(values = c("steelblue",  "darkorange"))
+```
+	
+Conclusión
+
+El modelo ajustado por REML confirma relaciones clave entre las variables y la producción, con buena significación en los efectos fijos y jerarquías bien modeladas en los efectos aleatorios. Sin embargo, el modelo robusto parece manejar mejor los valores atípicos, resultando en una varianza residual menor y un ajuste más robusto.
+
+
+```{r pred, message=FALSE}
+# Predicción y evaluación del modelo en los datos de prueba
+
+# Realizar predicciones con el modelo robusto en el conjunto de prueba
+predicciones_robusto <- predict(modelo_robusto, newdata = soja_prueba)
+
+# Realizar predicciones con el modelo estándar en el conjunto de prueba
+predicciones_estandar <- predict(modelo_estandar, newdata = soja_prueba)
+
+# Calcular el error cuadrático medio (RMSE) para ambos modelos
+rmse_robusto <- sqrt(mean((soja_prueba$produccion_tm - predicciones_robusto)^2))
+rmse_estandar <- sqrt(mean((soja_prueba$produccion_tm - predicciones_estandar)^2))
+
+# Calcular el MAE (Mean Absolute Error)
+mae_robusto <- mean(abs(soja_prueba$produccion_tm - predicciones_robusto))
+mae_estandar <- mean(abs(soja_prueba$produccion_tm - predicciones_estandar))
+
+# Calcular el MSE (Mean Squared Error)
+mse_robusto <- mean((soja_prueba$produccion_tm - predicciones_robusto)^2)
+mse_estandar <- mean((soja_prueba$produccion_tm - predicciones_estandar)^2)
+
+# Calcular el R² (Coeficiente de determinación)
+r2_robusto <- 1 - sum((soja_prueba$produccion_tm - predicciones_robusto)^2) / sum((soja_prueba$produccion_tm - mean(soja_prueba$produccion_tm))^2)
+r2_estandar <- 1 - sum((soja_prueba$produccion_tm - predicciones_estandar)^2) / sum((soja_prueba$produccion_tm - mean(soja_prueba$produccion_tm))^2)
+
+
+# Mostrar los resultados
+cat("RMSE del modelo robusto:", rmse_robusto, "\n")
+cat("RMSE del modelo estándar:", rmse_estandar, "\n")
+cat("MAE del modelo robusto:", mae_robusto, "\n")
+cat("MAE del modelo estándar:", mae_estandar, "\n")
+cat("MSE del modelo robusto:", mse_robusto, "\n")
+cat("MSE del modelo estándar:", mse_estandar, "\n")
+cat("R² del modelo robusto:", r2_robusto, "\n")
+cat("R² del modelo estándar:", r2_estandar, "\n")
+
+
+```
+```{r cuadropred, message=FALSE}
+# <!-- Métrica	Modelo Robusto	Modelo Estándar   Modelo lineal simple -->
+# <!-- RMSE 	55,017.28	        53,063.35           58846.48  -->
+# <!-- MAE 	23,119.63	        25,289.67           26271.46  -->
+# <!-- MSE 	3,026,901,318	    2,815,719,533       3,462,907,826  -->
+# <!-- R^2  	0.9199	          0.9255              0.9083408  -->
+
+# Crear un data frame con las métricas
+metricas <- data.frame(
+  Métrica = c("RMSE", "MAE", "MSE", "R²"),
+  `Modelo Robusto` = c(55017.28, 23119.63, 3026901318, 0.9199),
+  `Modelo Estándar` = c(53063.35, 25289.67, 2815719533, 0.9255),
+  `Modelo Lineal Simple` = c(58846.48, 26271.46, 3462907826, 0.9083)
+)
+
+# Mostrar la tabla formateada
+print(metricas)
+```
+
+
+	1.	Modelo estándar:
+	•	Presenta el mejor desempeño global en términos de  RMSE ,  MSE  y  R^2 .
+	•	Explica un 92.55% de la variabilidad en los datos, lo que es superior a los otros modelos.
+	
+	2.	Modelo robusto:
+	•	Aunque no tiene los mejores  RMSE  o  MSE , el MAE más bajo sugiere que tiene errores promedio más pequeños y estables.
+	•	Es más resistente a la influencia de valores atípicos, lo que lo hace más confiable en presencia de ruido o datos extremos.
+	
+	3.	Modelo lineal simple:
+	•	Es el más débil en todas las métricas.
+	•	 RMSE  y  MSE  son significativamente más altos debido a la falta de términos de ajuste adicionales (efectos aleatorios y covariables importantes como el año y el tipo de cultivo).
+	
+Conclusión:
+	El modelo estándar tiene un ajuste más preciso según el RMSE y el  R^2 , pero el modelo robusto es más confiable en escenarios donde los datos presentan valores atípicos significativos.
+
+```{r predgraf, message=FALSE}
+# Graficar las predicciones vs los valores reales
+predicciones_df <- data.frame(
+  Real = soja_prueba$produccion_tm,
+  Prediccion_Robusta = predicciones_robusto,
+  Prediccion_Estandar = predicciones_estandar
+)
+
+ggplot(predicciones_df, aes(x = Real)) +
+  geom_point(aes(y = Prediccion_Robusta), color = "steelblue", alpha = 0.5) +
+  geom_point(aes(y = Prediccion_Estandar), color = "darkorange", alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  labs(
+    title = "Predicciones vs Valores Reales: Robusto vs Estándar",
+    x = "Valores Reales",
+    y = "Predicciones"
+  )
+
+# Comparar los residuos de las predicciones con los valores reales
+residuos_robusto_test <- soja_prueba$produccion_tm - predicciones_robusto
+residuos_estandar_test <- soja_prueba$produccion_tm - predicciones_estandar
+
+# Crear un gráfico de los residuos
+residuos_test_df <- data.frame(
+  Residuos = c(residuos_robusto_test, residuos_estandar_test),
+  Modelo = rep(c("Robusto", "Estándar"), each = length(residuos_robusto_test))
+)
+
+ggplot(residuos_test_df, aes(x = Residuos, fill = Modelo)) +
+  geom_histogram(bins = 30, alpha = 0.7, position = "identity") +
+  theme_minimal() +
+  labs(title = "Distribución de Residuos en el Conjunto de Prueba: Robusto vs Estándar", 
+       x = "Residuos", y = "Frecuencia") +
+  scale_fill_manual(values = c("steelblue", "darkorange"))
+```
+	
+Finalmente puede verse como las predicciones para los valores extremos son un poco mejores para el modelo robusto, pero en general ambos modelos tienen un desempeño similar. Sin embargo, el modelo robusto es más confiable en presencia de valores atípicos y ruido, lo que lo hace preferible en la mayoría de los casos.
